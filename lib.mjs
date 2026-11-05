@@ -99,8 +99,26 @@ export async function searxngSearch(q, n, ms = 8000) {
   }));
 }
 
-export const PROVIDERS = { exa: exaSearch, tavily: tavilySearch, searxng: searxngSearch };
-const PAID = new Set(["exa", "tavily"]);
+
+export async function braveSearch(q, n, ms = 8000) {
+  const key = process.env.BRAVE_API_KEY || "";
+  if (!key) throw new Error("BRAVE_API_KEY missing");
+  const u = new URL("https://api.search.brave.com/res/v1/web/search");
+  u.searchParams.set("q", q); u.searchParams.set("count", String(Math.min(20, n)));
+  const r = await withTimeout(fetch(u, {
+    headers: { accept: "application/json", "x-subscription-token": key, "user-agent": UA },
+  }), ms, "brave");
+  if (!r.ok) throw new Error("brave http " + r.status);
+  const j = await r.json();
+  return ((j.web && j.web.results) || []).map((x) => ({
+    url: x.url, title: x.title || x.url,
+    snippet: (x.description || "").replace(/<[^>]+>/g, "").slice(0, 400),
+    published: x.age || x.page_age, provider: "brave",
+  }));
+}
+
+export const PROVIDERS = { exa: exaSearch, tavily: tavilySearch, brave: braveSearch, searxng: searxngSearch };
+const PAID = new Set(["exa", "tavily", "brave"]);
 
 export function rrf(lists, k = 60) {
   const map = new Map();
@@ -118,7 +136,7 @@ export function rrf(lists, k = 60) {
   return [...map.values()].sort((a, b) => b.score - a.score).map((x) => ({ ...x, providers: [...x.providers] }));
 }
 
-export async function search(query, { n = 10, paid = 1, providers = ["exa", "tavily", "searxng"], deadlineMs = 8000 } = {}) {
+export async function search(query, { n = 10, paid = 1, providers = ["exa", "tavily", "brave", "searxng"], deadlineMs = 8000 } = {}) {
   const cacheKey = "s:" + JSON.stringify([query, n, paid, providers]);
   const hit = cacheGet(cacheKey);
   if (hit) return { ...hit.value, elapsedMs: 0, cached: true, cacheAgeMs: Date.now() - hit.at, originalElapsedMs: hit.value.elapsedMs };
@@ -130,11 +148,15 @@ export async function search(query, { n = 10, paid = 1, providers = ["exa", "tav
     return true;
   });
   const t0 = Date.now();
-  const settled = await Promise.allSettled(names.map(async (p) => ({ provider: p, items: await PROVIDERS[p](query, n, deadlineMs) })));
+  const settled = await Promise.allSettled(names.map(async (p) => {
+    const t = Date.now();
+    const items = await PROVIDERS[p](query, n, deadlineMs);
+    return { provider: p, items, ms: Date.now() - t };
+  }));
   const meta = [], ok = [];
   settled.forEach((r, i) => {
     const p = names[i];
-    if (r.status === "fulfilled") { meta.push({ provider: p, count: r.value.items.length }); ok.push(r.value); }
+    if (r.status === "fulfilled") { meta.push({ provider: p, count: r.value.items.length, ms: r.value.ms }); ok.push(r.value); }
     else meta.push({ provider: p, count: 0, error: String((r.reason && r.reason.message) || r.reason) });
   });
   const out = { query, elapsedMs: Date.now() - t0, providers: meta, results: rrf(ok).slice(0, n), cached: false };

@@ -6,13 +6,13 @@ import { search, fetchText, tavilyExtract, tavilyCrawl, tavilyMap, tavilyResearc
 const TOOLS = [
   {
     name: "ws_search",
-    description: "聚合搜索：并行 Exa（语义）+ Tavily（结构化）+ SearXNG（自托管、免费），按 canonical URL 去重后 RRF 融合。默认只花 1 个付费源，SearXNG 始终参与；单源失败自动降级。结果带 providers 归属与 cached 标记。",
+    description: "聚合搜索：并行 Exa（语义）+ Tavily（结构化）+ Brave（自有 API）+ SearXNG（自托管、免费），按 canonical URL 去重后 RRF 融合。默认只花 1 个付费源，SearXNG 始终参与；单源失败自动降级。结果带 providers 归属与 cached 标记。",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "检索词或自然语言描述" },
         n: { type: "integer", default: 10, description: "返回条数" },
-        paid: { type: "integer", default: 1, description: "允许的付费源个数（0-2）" },
+        paid: { type: "integer", default: 1, description: "允许的付费源个数（0-3，候选顺序 exa>tavily>brave）" },
       },
       required: ["query"],
     },

@@ -12,7 +12,7 @@ if (cmd === "search") {
   const out = await search(q, {
     n: Number(flag("n", 10)),
     paid: Number(flag("paid", 1)),
-    providers: String(flag("providers", "exa,tavily,searxng")).split(",").map((s) => s.trim()).filter(Boolean),
+    providers: String(flag("providers", "exa,tavily,brave,searxng")).split(",").map((s) => s.trim()).filter(Boolean),
   });
   if (args.includes("--json")) console.log(JSON.stringify(out, null, 2));
   else {
