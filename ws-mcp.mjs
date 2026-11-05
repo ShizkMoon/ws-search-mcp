@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 // ws-mcp — 把 ws 检索网关暴露为 MCP server（stdio, JSON-RPC 2.0, 按行分隔）
 import { createInterface } from "node:readline";
-import { search, fetchText, tavilyExtract, tavilyCrawl, tavilyMap, tavilyResearch, exaAgent, cacheStats } from "./lib.mjs";
+import { search, fetchText, tavilyExtract, tavilyCrawl, tavilyMap, tavilyResearch, exaAgent, cacheStats, deepSearch, loadEnvFile, envStatus, ENV_FILE } from "./lib.mjs";
+
+// 密钥来源：模块同目录的 .env（或 WS_ENV_FILE 指定的路径）。启动读一次，
+// 之后每次调用再读一次（override），这样换钥匙不必重启 MCP 子进程。
+const envBoot = loadEnvFile(undefined, { override: true });
+if (!envBoot.found) process.stderr.write(`ws-mcp: ${ENV_FILE} not found; relying on inherited environment\n`);
 
 const TOOLS = [
   {
@@ -85,6 +90,27 @@ const TOOLS = [
       required: ["query"],
     },
   },
+  {
+    name: "ws_deep",
+    description: "多轮深度检索：把问题拆成原理/对比/排错几个面并行搜，抓回正文，用问题里的术语量覆盖度，没覆盖够就带着缺口再搜一轮；最后只回带原文引句的证据和覆盖度报告。问题需要准确、有深度、要判断可信度时用它，而不是 ws_search。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "要搞清的问题（自然语言，写清判据）" },
+        rounds: { type: "integer", default: 2, description: "最多几轮（1-4）" },
+        pages: { type: "integer", default: 6, description: "每轮回读正文的页数（本机抓取，免费）" },
+        min_coverage: { type: "number", default: 0.6, description: "覆盖度达到多少就停（0-1）" },
+        recency: { type: "string", enum: ["day", "week", "month", "year"], description: "只要这段时间内的结果" },
+        paid: { type: "integer", description: "允许的付费源个数（0-3），默认按查询类型自动" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "ws_env",
+    description: "诊断：报告四把密钥是否加载、.env 路径、缓存条目数。只回布尔值，不回密钥内容。",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
@@ -98,6 +124,14 @@ const HANDLERS = {
   ws_crawl: (a) => tavilyCrawl(a.url, { limit: a.limit ?? 20, maxDepth: a.max_depth ?? 1, instructions: a.instructions }),
   ws_research: (a) => tavilyResearch(a.input, { model: a.model ?? "auto" }),
   ws_agent: (a) => exaAgent(a.query, { effort: a.effort ?? "auto" }),
+    ws_deep: (a) => deepSearch(a.query, {
+      rounds: Math.min(4, Math.max(1, a.rounds ?? 2)),
+      pages: a.pages ?? 6,
+      minCoverage: a.min_coverage ?? 0.6,
+      recency: a.recency,
+      paid: a.paid,
+    }),
+  ws_env: () => ({ ...envStatus(), cache: cacheStats() }),
 };
 
 async function handle(msg) {
@@ -117,6 +151,7 @@ async function handle(msg) {
     try {
       const fn = HANDLERS[name];
       if (!fn) throw new Error("unknown tool: " + name);
+      loadEnvFile(undefined, { override: true });
       const out = await fn(a);
       return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } });
     } catch (e) {

@@ -1,14 +1,16 @@
 {
   "name": "ws-search-mcp",
-  "version": "0.2.0",
-  "description": "Aggregating search gateway exposed as an MCP server (Exa + Tavily + SearXNG, RRF fusion).",
+  "version": "0.3.0",
+  "description": "Aggregating search gateway exposed as an MCP server (Exa + Tavily + Brave + SearXNG, RRF fusion, query-type routing).",
   "type": "module",
   "bin": {
     "ws-search-mcp": "ws-mcp.mjs",
     "ws": "ws.mjs"
   },
   "scripts": {
-    "start": "node ws-mcp.mjs"
+    "start": "node ws-mcp.mjs",
+    "test": "node tests/smoke.mjs",
+    "test:live": "node tests/smoke.mjs --live"
   },
   "engines": {
     "node": ">=20"
