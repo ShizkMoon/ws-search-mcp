@@ -10,9 +10,9 @@ if (cmd === "search") {
   const q = flag("q", "");
   if (!q) { console.error('usage: wsch --q "query" [--n 10] [--paid 1] [--providers exa,tavily,searxng]'); process.exit(2); }
   const out = await search(q, {
-    n: Number(flag("n", 10)),
+    n: Number(flag("n", 25)),
     paid: Number(flag("paid", 1)),
-    providers: String(flag("providers", "exa,tavily,brave,searxng")).split(",").map((s) => s.trim()).filter(Boolean),
+    providers: flag("providers", "") ? String(flag("providers", "")).split(",").map((s) => s.trim()).filter(Boolean) : null,
   });
   if (args.includes("--json")) console.log(JSON.stringify(out, null, 2));
   else {

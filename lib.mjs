@@ -136,7 +136,14 @@ export function rrf(lists, k = 60) {
   return [...map.values()].sort((a, b) => b.score - a.score).map((x) => ({ ...x, providers: [...x.providers] }));
 }
 
-export async function search(query, { n = 10, paid = 1, providers = ["exa", "tavily", "brave", "searxng"], deadlineMs = 8000 } = {}) {
+const isCJK = (s) => /[\u4e00-\u9fff]/.test(s);
+/** 付费源顺序：中文优先 Tavily，其余优先 Exa（依据英文基准 Exa>Brave>Tavily） */
+export function paidOrder(query) {
+  return isCJK(query) ? ["tavily", "brave", "exa"] : ["exa", "brave", "tavily"];
+}
+
+export async function search(query, { n = 25, paid = 1, providers = null, deadlineMs = 8000, snippetHead = 400, snippetRest = 240 } = {}) {
+  providers = providers || [...paidOrder(query), "searxng"];
   const cacheKey = "s:" + JSON.stringify([query, n, paid, providers]);
   const hit = cacheGet(cacheKey);
   if (hit) return { ...hit.value, elapsedMs: 0, cached: true, cacheAgeMs: Date.now() - hit.at, originalElapsedMs: hit.value.elapsedMs };
@@ -159,7 +166,11 @@ export async function search(query, { n = 10, paid = 1, providers = ["exa", "tav
     if (r.status === "fulfilled") { meta.push({ provider: p, count: r.value.items.length, ms: r.value.ms }); ok.push(r.value); }
     else meta.push({ provider: p, count: 0, error: String((r.reason && r.reason.message) || r.reason) });
   });
-  const out = { query, elapsedMs: Date.now() - t0, providers: meta, results: rrf(ok).slice(0, n), cached: false };
+  const merged = rrf(ok).slice(0, n).map((r, i) => ({
+    ...r,
+    snippet: (r.snippet || "").slice(0, i < 5 ? snippetHead : snippetRest),
+  }));
+  const out = { query, elapsedMs: Date.now() - t0, providers: meta, results: merged, cached: false };
   cacheSet(cacheKey, out);
   return out;
 }

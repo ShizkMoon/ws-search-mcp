@@ -11,8 +11,8 @@ const TOOLS = [
       type: "object",
       properties: {
         query: { type: "string", description: "检索词或自然语言描述" },
-        n: { type: "integer", default: 10, description: "返回条数" },
-        paid: { type: "integer", default: 1, description: "允许的付费源个数（0-3，候选顺序 exa>tavily>brave）" },
+        n: { type: "integer", default: 25, description: "返回条数；前 5 条给完整摘要(400字)，其余截断到 240 字" },
+        paid: { type: "integer", default: 1, description: "允许的付费源个数（0-3）。顺序自动按语言选：中文 tavily>brave>exa，其余 exa>brave>tavily" },
       },
       required: ["query"],
     },
@@ -86,7 +86,7 @@ const TOOLS = [
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 const HANDLERS = {
-  ws_search: (a) => search(a.query, { n: a.n ?? 10, paid: a.paid ?? 1 }),
+  ws_search: (a) => search(a.query, { n: a.n ?? 25, paid: a.paid ?? 1 }),
   ws_fetch: (a) => (Array.isArray(a.urls) && a.urls.length
     ? tavilyExtract(a.urls, { depth: a.depth ?? "basic" })
     : fetchText(a.url, a.max ?? 3000)),
