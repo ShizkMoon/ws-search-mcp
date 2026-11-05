@@ -16,6 +16,7 @@ const TOOLS = [
         recency: { type: "string", enum: ["day", "week", "month", "year"], description: "只要这段时间内的结果（新闻类查询必用）" },
         max_per_domain: { type: "integer", default: 3, description: "同一域名最多保留几条（提高来源广度，0=不限）" },
         queries: { type: "array", items: { type: "string" }, description: "多查询扩展：给 2-3 种不同措辞，结果合并去重后可显著提高召回（每个 query 都会独立计费）" },
+        enrich: { type: "boolean", description: "是否给前 3 条附上真实正文（默认按查询类型自动决定；正文取自本机抓取，免费）" },
       },
       required: ["query"],
     },
@@ -89,7 +90,7 @@ const TOOLS = [
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 const HANDLERS = {
-  ws_search: (a) => search(a.query, { n: a.n ?? 25, paid: a.paid ?? 1, recency: a.recency ?? null, maxPerDomain: a.max_per_domain ?? 3, queries: a.queries }),
+  ws_search: (a) => search(a.query, { n: a.n ?? 25, paid: a.paid, recency: a.recency, maxPerDomain: a.max_per_domain ?? 3, queries: a.queries, enrich: a.enrich }),
   ws_fetch: (a) => (Array.isArray(a.urls) && a.urls.length
     ? tavilyExtract(a.urls, { depth: a.depth ?? "basic" })
     : fetchText(a.url, a.max ?? 3000)),

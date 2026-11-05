@@ -62,6 +62,37 @@ async function jget(url, headers = {}, ms = 60000, label = url) {
 const exaHeaders = () => ({ "x-api-key": EXA_KEY() });
 const tavilyBearer = () => ({ Authorization: "Bearer " + TAVILY_KEY() });
 
+
+// ── 查询类型识别（n 恒为 25，只有时效/付费档/正文增强随类型变）──────────────
+export function detectQueryType(q) {
+  const s = String(q || "");
+  if (/\bsite:\S+/i.test(s) || /^https?:\/\//.test(s)) return { type: "navigational", recency: null, paid: 1, enrich: false };
+  if (/(最新|今天|今日|本周|近日|刚刚|突发|融资|公告|财报|发布|latest|today|this week|breaking|news|announce)/i.test(s))
+    return { type: "news", recency: "week", paid: 1, enrich: false };
+  if (/(对比|比较|哪个好|选型|推荐|选购|排行|vs\b|versus|compare|comparison|best |top \d|alternative)/i.test(s))
+    return { type: "comparative", recency: null, paid: 2, enrich: true };
+  if (/(如何|怎么|怎样|教程|步骤|配置|部署|how to|tutorial|guide|setup|install|configure|example)/i.test(s))
+    return { type: "howto", recency: null, paid: 1, enrich: true };
+  return { type: "factual", recency: null, paid: 1, enrich: true };
+}
+
+// ── 权威度权重（乘在 RRF 分数上，不改召回，只微调排序）────────────────────
+const AUTH_BOOST = [
+  [/(^|\.)wikipedia\.org$|(^|\.)arxiv\.org$|\.edu$|\.gov$/, 1.25],
+  [/(^|\.)github\.com$|(^|\.)docs\.|^developer\.|(^|\.)mozilla\.org$|(^|\.)nodejs\.org$|(^|\.)python\.org$|(^|\.)kubernetes\.io$/, 1.2],
+  [/(^|\.)stackoverflow\.com$|(^|\.)stackexchange\.com$/, 1.1],
+];
+const AUTH_PENALTY = [
+  [/(^|\.)(alphacorp|iternal|olostep|vdf|recatools|keirolabs|webscraft|cooldev|thestatuscode|hyper|sphereinc)\.(ai|com|cloud|org|tools|dev)$/, 0.75],
+  [/(^|\.)quora\.com$|(^|\.)reddit\.com$/, 0.9],
+];
+export function authorityOf(host) {
+  const h = String(host || "").toLowerCase();
+  for (const [re, w] of AUTH_BOOST) if (re.test(h)) return w;
+  for (const [re, w] of AUTH_PENALTY) if (re.test(h)) return w;
+  return 1;
+}
+
 // ── 缓存（进程内 LRU）──────────────────────────────────────────────────────
 const CACHE_TTL = Number(process.env.WS_CACHE_TTL_MS || 300000);
 const CACHE_MAX = Number(process.env.WS_CACHE_MAX || 500);
@@ -198,15 +229,19 @@ function diversify(list, n, maxPerDomain) {
  *          snippetHead?:number, snippetRest?:number}} o
  */
 export async function search(query, o = {}) {
+  const det = detectQueryType(query);
   const {
-    n = 25, paid = 1, recency = null, maxPerDomain = 3,
-    deadlineMs = 8000, snippetHead = 400, snippetRest = 240,
+    n = 25, maxPerDomain = 3, deadlineMs = 8000,
+    snippetHead = 400, snippetRest = 240, enrichTop = 3, enrichChars = 1200,
   } = o;
+  const paid = o.paid ?? det.paid;
+  const recency = o.recency ?? det.recency;
+  const enrich = o.enrich ?? det.enrich;
   const queries = (o.queries && o.queries.length ? o.queries : [query]).slice(0, 4);
   const providers = o.providers || [...paidOrder(query), "searxng"];
   const opts = recencyOpts(recency);
 
-  const cacheKey = "s:" + JSON.stringify([queries, n, paid, providers, recency, maxPerDomain]);
+  const cacheKey = "s:" + JSON.stringify([queries, n, paid, providers, recency, maxPerDomain, enrich]);
   const hit = cacheGet(cacheKey);
   if (hit) return { ...hit.value, elapsedMs: 0, cached: true, cacheAgeMs: Date.now() - hit.at, originalElapsedMs: hit.value.elapsedMs };
 
@@ -243,14 +278,30 @@ export async function search(query, o = {}) {
     meta.set(p, m);
   });
 
-  const merged = diversify(rrf(lists), n, maxPerDomain).map((r, i) => ({
+  // 权威度微调：乘在 RRF 分数上，只改排序不改召回
+  const weighted = rrf(lists)
+    .map((r) => ({ ...r, score: +(r.score * authorityOf(hostOf(r.url))).toFixed(6) }))
+    .sort((a, b) => b.score - a.score);
+
+  const merged = diversify(weighted, n, maxPerDomain).map((r, i) => ({
     ...r,
     snippet: (r.snippet || "").slice(0, i < 5 ? snippetHead : snippetRest),
   }));
 
+  // 正文增强：给前几条附真实正文，便于判断是否值得深入（本机抓取、免费、有缓存）
+  if (enrich && merged.length) {
+    await Promise.all(merged.slice(0, enrichTop).map(async (r) => {
+      try {
+        const f = await fetchText(r.url, enrichChars);
+        r.contentChars = f.chars;
+        r.content = f.text;
+      } catch (e) { r.contentError = String((e && e.message) || e).slice(0, 80); }
+    }));
+  }
+
   const out = {
-    query, queries, elapsedMs: Date.now() - t0,
-    providers: [...meta.values()], results: merged, cached: false,
+    query, queries, type: det.type, recency, enriched: enrich,
+    elapsedMs: Date.now() - t0, providers: [...meta.values()], results: merged, cached: false,
   };
   cacheSet(cacheKey, out);
   return out;
