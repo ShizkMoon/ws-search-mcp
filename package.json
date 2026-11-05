@@ -1,0 +1,17 @@
+{
+  "name": "ws-search-mcp",
+  "version": "0.2.0",
+  "description": "Aggregating search gateway exposed as an MCP server (Exa + Tavily + SearXNG, RRF fusion).",
+  "type": "module",
+  "bin": {
+    "ws-search-mcp": "ws-mcp.mjs",
+    "ws": "ws.mjs"
+  },
+  "scripts": {
+    "start": "node ws-mcp.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
