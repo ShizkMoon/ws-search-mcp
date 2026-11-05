@@ -1,9 +1,10 @@
-// ws/lib.mjs — 检索后端、融合与缓存（CLI 与 MCP 共用，零依赖，Node >= 20）
+// ws/lib.mjs — 检索后端、融合、去重与缓存（CLI 与 MCP 共用，零依赖，Node >= 20）
 export const EXA_KEY = () => process.env.EXA_API_KEY || "";
 export const TAVILY_KEY = () => process.env.TAVILY_API_KEY || "";
+export const BRAVE_KEY = () => process.env.BRAVE_API_KEY || "";
 export const SEARXNG_URL = () => process.env.SEARXNG_URL || "http://127.0.0.1:8888";
 
-const UA = "Mozilla/5.0 (compatible; ws/0.2)";
+const UA = "Mozilla/5.0 (compatible; ws/0.3)";
 
 export function canonical(url) {
   try {
@@ -19,17 +20,32 @@ export function canonical(url) {
   } catch { return String(url || "").toLowerCase(); }
 }
 
+export const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, "").toLowerCase(); } catch { return "?"; } };
+
 export async function withTimeout(promise, ms, label) {
   let timer;
   const t = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(label + " timeout " + ms + "ms")), ms); });
   try { return await Promise.race([promise, t]); } finally { clearTimeout(timer); }
 }
 
+/** 瞬时错误重试一次：网络抖动与限流很常见，重试比降级划算。 */
+async function withRetry(fn, tries = 2, delayMs = 400) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); } catch (e) {
+      last = e;
+      const msg = String(e && e.message || e);
+      const transient = /http (429|5\d\d)|timeout|fetch failed|ECONN|ENOTFOUND/i.test(msg);
+      if (!transient || i === tries - 1) throw e;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw last;
+}
+
 async function jpost(url, body, headers = {}, ms = 60000, label = url) {
   const r = await withTimeout(fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
+    method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
   }), ms, label);
   const text = await r.text();
   if (!r.ok) throw new Error(label + " http " + r.status + " " + text.slice(0, 200));
@@ -64,12 +80,29 @@ function cacheSet(key, value, ttl = CACHE_TTL) {
 }
 export function cacheStats() { return { entries: _cache.size, ttlMs: CACHE_TTL }; }
 
-// ── 搜索：三家后端 ─────────────────────────────────────────────────────────────────
-export async function exaSearch(q, n, ms = 8000) {
+// ── 时效性参数映射 ─────────────────────────────────────────────────────────
+const RECENCY = {
+  day: { brave: "pd", days: 1 },
+  week: { brave: "pw", days: 7 },
+  month: { brave: "pm", days: 30 },
+  year: { brave: "py", days: 365 },
+};
+function recencyOpts(recency) {
+  const r = RECENCY[recency];
+  if (!r) return {};
+  return {
+    braveFreshness: r.brave,
+    tavilyDays: r.days,
+    exaStartPublished: new Date(Date.now() - r.days * 86400000).toISOString(),
+  };
+}
+
+// ── 搜索：四家后端 ─────────────────────────────────────────────────────────
+export async function exaSearch(q, n, ms = 8000, opts = {}) {
   if (!EXA_KEY()) throw new Error("EXA_API_KEY missing");
-  const j = await jpost("https://api.exa.ai/search", {
-    query: q, type: "auto", numResults: n, contents: { highlights: { numSentences: 1 } },
-  }, exaHeaders(), ms, "exa");
+  const body = { query: q, type: "auto", numResults: n, contents: { highlights: { numSentences: 1 } } };
+  if (opts.exaStartPublished) body.startPublishedDate = opts.exaStartPublished;
+  const j = await jpost("https://api.exa.ai/search", body, exaHeaders(), ms, "exa");
   return (j.results || []).map((x) => ({
     url: x.url, title: x.title || x.url,
     snippet: (x.highlights && x.highlights[0]) || x.summary || "",
@@ -77,36 +110,25 @@ export async function exaSearch(q, n, ms = 8000) {
   }));
 }
 
-export async function tavilySearch(q, n, ms = 8000) {
+export async function tavilySearch(q, n, ms = 8000, opts = {}) {
   if (!TAVILY_KEY()) throw new Error("TAVILY_API_KEY missing");
-  const j = await jpost("https://api.tavily.com/search", {
-    api_key: TAVILY_KEY(), query: q, max_results: n, search_depth: "basic",
-  }, {}, ms, "tavily");
+  const body = { api_key: TAVILY_KEY(), query: q, max_results: n, search_depth: "basic" };
+  if (opts.tavilyDays) { body.days = opts.tavilyDays; body.topic = "news"; }
+  const j = await jpost("https://api.tavily.com/search", body, {}, ms, "tavily");
   return (j.results || []).map((x) => ({
     url: x.url, title: x.title || x.url, snippet: (x.content || "").slice(0, 400),
     published: x.published_date, provider: "tavily",
   }));
 }
 
-export async function searxngSearch(q, n, ms = 8000) {
-  const u = new URL(SEARXNG_URL() + "/search");
-  u.searchParams.set("q", q); u.searchParams.set("format", "json");
-  const r = await withTimeout(fetch(u, { headers: { accept: "application/json" } }), ms, "searxng");
-  if (!r.ok) throw new Error("searxng http " + r.status);
-  const j = await r.json();
-  return (j.results || []).slice(0, n).map((x) => ({
-    url: x.url, title: x.title || x.url, snippet: x.content || "", published: x.publishedDate, provider: "searxng",
-  }));
-}
-
-
-export async function braveSearch(q, n, ms = 8000) {
-  const key = process.env.BRAVE_API_KEY || "";
-  if (!key) throw new Error("BRAVE_API_KEY missing");
+export async function braveSearch(q, n, ms = 8000, opts = {}) {
+  if (!BRAVE_KEY()) throw new Error("BRAVE_API_KEY missing");
   const u = new URL("https://api.search.brave.com/res/v1/web/search");
-  u.searchParams.set("q", q); u.searchParams.set("count", String(Math.min(20, n)));
+  u.searchParams.set("q", q);
+  u.searchParams.set("count", String(Math.min(20, n)));
+  if (opts.braveFreshness) u.searchParams.set("freshness", opts.braveFreshness);
   const r = await withTimeout(fetch(u, {
-    headers: { accept: "application/json", "x-subscription-token": key, "user-agent": UA },
+    headers: { accept: "application/json", "x-subscription-token": BRAVE_KEY(), "user-agent": UA },
   }), ms, "brave");
   if (!r.ok) throw new Error("brave http " + r.status);
   const j = await r.json();
@@ -117,8 +139,26 @@ export async function braveSearch(q, n, ms = 8000) {
   }));
 }
 
+export async function searxngSearch(q, n, ms = 8000, opts = {}) {
+  const u = new URL(SEARXNG_URL() + "/search");
+  u.searchParams.set("q", q); u.searchParams.set("format", "json");
+  if (opts.lang) u.searchParams.set("language", opts.lang);
+  const r = await withTimeout(fetch(u, { headers: { accept: "application/json" } }), ms, "searxng");
+  if (!r.ok) throw new Error("searxng http " + r.status);
+  const j = await r.json();
+  return (j.results || []).slice(0, n).map((x) => ({
+    url: x.url, title: x.title || x.url, snippet: x.content || "", published: x.publishedDate, provider: "searxng",
+  }));
+}
+
 export const PROVIDERS = { exa: exaSearch, tavily: tavilySearch, brave: braveSearch, searxng: searxngSearch };
 const PAID = new Set(["exa", "tavily", "brave"]);
+
+const isCJK = (s) => /[\u4e00-\u9fff]/.test(s);
+/** 付费源顺序：中文优先 Tavily，其余优先 Exa（英文基准 Exa > Brave > Tavily） */
+export function paidOrder(query) {
+  return isCJK(query) ? ["tavily", "brave", "exa"] : ["exa", "brave", "tavily"];
+}
 
 export function rrf(lists, k = 60) {
   const map = new Map();
@@ -136,15 +176,37 @@ export function rrf(lists, k = 60) {
   return [...map.values()].sort((a, b) => b.score - a.score).map((x) => ({ ...x, providers: [...x.providers] }));
 }
 
-const isCJK = (s) => /[\u4e00-\u9fff]/.test(s);
-/** 付费源顺序：中文优先 Tavily，其余优先 Exa（依据英文基准 Exa>Brave>Tavily） */
-export function paidOrder(query) {
-  return isCJK(query) ? ["tavily", "brave", "exa"] : ["exa", "brave", "tavily"];
+function diversify(list, n, maxPerDomain) {
+  const counts = new Map();
+  const picked = [];
+  for (const r of list) {
+    const h = hostOf(r.url);
+    const c = counts.get(h) || 0;
+    if (maxPerDomain > 0 && c >= maxPerDomain) continue;
+    counts.set(h, c + 1);
+    picked.push(r);
+    if (picked.length >= n) break;
+  }
+  return picked;
 }
 
-export async function search(query, { n = 25, paid = 1, providers = null, deadlineMs = 8000, snippetHead = 400, snippetRest = 240 } = {}) {
-  providers = providers || [...paidOrder(query), "searxng"];
-  const cacheKey = "s:" + JSON.stringify([query, n, paid, providers]);
+/**
+ * 聚合检索。
+ * @param {string} query
+ * @param {{n?:number, paid?:number, providers?:string[]|null, recency?:string|null,
+ *          maxPerDomain?:number, queries?:string[], deadlineMs?:number,
+ *          snippetHead?:number, snippetRest?:number}} o
+ */
+export async function search(query, o = {}) {
+  const {
+    n = 25, paid = 1, recency = null, maxPerDomain = 3,
+    deadlineMs = 8000, snippetHead = 400, snippetRest = 240,
+  } = o;
+  const queries = (o.queries && o.queries.length ? o.queries : [query]).slice(0, 4);
+  const providers = o.providers || [...paidOrder(query), "searxng"];
+  const opts = recencyOpts(recency);
+
+  const cacheKey = "s:" + JSON.stringify([queries, n, paid, providers, recency, maxPerDomain]);
   const hit = cacheGet(cacheKey);
   if (hit) return { ...hit.value, elapsedMs: 0, cached: true, cacheAgeMs: Date.now() - hit.at, originalElapsedMs: hit.value.elapsedMs };
 
@@ -154,23 +216,42 @@ export async function search(query, { n = 25, paid = 1, providers = null, deadli
     if (PAID.has(p)) { if (paidUsed >= paid) return false; paidUsed++; }
     return true;
   });
+
   const t0 = Date.now();
-  const settled = await Promise.allSettled(names.map(async (p) => {
-    const t = Date.now();
-    const items = await PROVIDERS[p](query, n, deadlineMs);
-    return { provider: p, items, ms: Date.now() - t };
-  }));
-  const meta = [], ok = [];
+  const jobs = [];
+  for (const p of names) for (const q of queries) {
+    jobs.push((async () => {
+      const s = Date.now();
+      const items = await withRetry(() => PROVIDERS[p](q, n, deadlineMs, opts));
+      return { provider: p, query: q, items, ms: Date.now() - s };
+    })());
+  }
+  const settled = await Promise.allSettled(jobs);
+
+  const meta = new Map();
+  const lists = [];
   settled.forEach((r, i) => {
-    const p = names[i];
-    if (r.status === "fulfilled") { meta.push({ provider: p, count: r.value.items.length, ms: r.value.ms }); ok.push(r.value); }
-    else meta.push({ provider: p, count: 0, error: String((r.reason && r.reason.message) || r.reason) });
+    const p = names[Math.floor(i / queries.length)];
+    const m = meta.get(p) || { provider: p, count: 0, ms: 0 };
+    if (r.status === "fulfilled") {
+      m.count += r.value.items.length;
+      m.ms = Math.max(m.ms, r.value.ms);
+      lists.push({ provider: r.value.provider, items: r.value.items });
+    } else if (!m.error) {
+      m.error = String((r.reason && r.reason.message) || r.reason);
+    }
+    meta.set(p, m);
   });
-  const merged = rrf(ok).slice(0, n).map((r, i) => ({
+
+  const merged = diversify(rrf(lists), n, maxPerDomain).map((r, i) => ({
     ...r,
     snippet: (r.snippet || "").slice(0, i < 5 ? snippetHead : snippetRest),
   }));
-  const out = { query, elapsedMs: Date.now() - t0, providers: meta, results: merged, cached: false };
+
+  const out = {
+    query, queries, elapsedMs: Date.now() - t0,
+    providers: [...meta.values()], results: merged, cached: false,
+  };
   cacheSet(cacheKey, out);
   return out;
 }
@@ -193,7 +274,6 @@ export async function fetchText(url, max = 3000) {
   return out;
 }
 
-/** Tavily extract：适合反爬强、需要 JS 渲染或批量抓取的场景。 */
 export async function tavilyExtract(urls, { depth = "basic" } = {}) {
   if (!TAVILY_KEY()) throw new Error("TAVILY_API_KEY missing");
   const key = "x:" + JSON.stringify([urls, depth]);
@@ -211,7 +291,14 @@ export async function tavilyExtract(urls, { depth = "basic" } = {}) {
   return out;
 }
 
-// ── 站点级：crawl / map（Tavily，需 Bearer）─────────────────────────────────
+// ── 站点级：crawl / map ────────────────────────────────────────────────────
+function sameHost(url, base) {
+  try {
+    const h = hostOf(url), b = hostOf(base);
+    return h === b || h.endsWith("." + b);
+  } catch { return false; }
+}
+
 async function pollTavilyKind(path, id, { timeoutMs = 180000, intervalMs = 4000 } = {}) {
   const t0 = Date.now();
   for (;;) {
@@ -242,14 +329,6 @@ export async function tavilyCrawl(url, { limit = 20, maxDepth = 1, maxBreadth = 
   return out;
 }
 
-function sameHost(url, base) {
-  try {
-    const h = new URL(url).hostname.replace(/^www\./, "");
-    const b = new URL(base).hostname.replace(/^www\./, "");
-    return h === b || h.endsWith("." + b);
-  } catch { return false; }
-}
-
 export async function tavilyMap(url, { limit = 50, maxDepth = 2, maxBreadth = 20 } = {}) {
   if (!TAVILY_KEY()) throw new Error("TAVILY_API_KEY missing");
   const key = "m:" + JSON.stringify([url, limit, maxDepth]);
@@ -264,7 +343,7 @@ export async function tavilyMap(url, { limit = 50, maxDepth = 2, maxBreadth = 20
   return out;
 }
 
-// ── 研究：Tavily research（异步）/ Exa agent（异步）──────────────────────────
+// ── 研究：Tavily research / Exa agent（异步）────────────────────────────────
 export async function tavilyResearch(input, { model = "auto", timeoutMs = 240000 } = {}) {
   if (!TAVILY_KEY()) throw new Error("TAVILY_API_KEY missing");
   const key = "r:" + JSON.stringify([input, model]);
