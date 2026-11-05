@@ -77,7 +77,6 @@ const TOOLS = [
       properties: {
         query: { type: "string", description: "研究目标（自然语言）" },
         effort: { type: "string", enum: ["low", "medium", "high", "auto"], default: "auto" },
-        max_cost_dollars: { type: "number", default: 1, description: "单次运行成本上限（美元）" },
       },
       required: ["query"],
     },
@@ -94,7 +93,7 @@ const HANDLERS = {
   ws_map: (a) => tavilyMap(a.url, { limit: a.limit ?? 50, maxDepth: a.max_depth ?? 2 }),
   ws_crawl: (a) => tavilyCrawl(a.url, { limit: a.limit ?? 20, maxDepth: a.max_depth ?? 1, instructions: a.instructions }),
   ws_research: (a) => tavilyResearch(a.input, { model: a.model ?? "auto" }),
-  ws_agent: (a) => exaAgent(a.query, { effort: a.effort ?? "auto", maxCostDollars: a.max_cost_dollars ?? 1 }),
+  ws_agent: (a) => exaAgent(a.query, { effort: a.effort ?? "auto" }),
 };
 
 async function handle(msg) {

@@ -202,11 +202,19 @@ export async function tavilyCrawl(url, { limit = 20, maxDepth = 1, maxBreadth = 
   if (!j.results && j.request_id) j = await pollTavilyKind("crawl", j.request_id);
   const out = {
     baseUrl: url, timedOut: !!j.timedOut,
-    pages: (j.results || []).map((x) => ({ url: x.url, chars: (x.raw_content || "").length, text: (x.raw_content || "").slice(0, 3000) })),
+    pages: (j.results || []).filter((x) => sameHost(x.url, url)).map((x) => ({ url: x.url, chars: (x.raw_content || "").length, text: (x.raw_content || "").slice(0, 3000) })),
     cached: false,
   };
   cacheSet(key, out, 600000);
   return out;
+}
+
+function sameHost(url, base) {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, "");
+    const b = new URL(base).hostname.replace(/^www\./, "");
+    return h === b || h.endsWith("." + b);
+  } catch { return false; }
 }
 
 export async function tavilyMap(url, { limit = 50, maxDepth = 2, maxBreadth = 20 } = {}) {
@@ -217,7 +225,8 @@ export async function tavilyMap(url, { limit = 50, maxDepth = 2, maxBreadth = 20
 
   let j = await jpost("https://api.tavily.com/map", { url, max_depth: maxDepth, max_breadth: maxBreadth, limit }, tavilyBearer(), 120000, "tavily.map");
   if (!j.results && j.request_id) j = await pollTavilyKind("map", j.request_id);
-  const out = { baseUrl: url, count: (j.results || []).length, urls: (j.results || []).map((x) => (typeof x === "string" ? x : x.url)), cached: false };
+  const urls = (j.results || []).map((x) => (typeof x === "string" ? x : x.url)).filter((u) => sameHost(u, url));
+  const out = { baseUrl: url, count: urls.length, urls, cached: false };
   cacheSet(key, out, 3600000);
   return out;
 }
@@ -239,7 +248,7 @@ export async function tavilyResearch(input, { model = "auto", timeoutMs = 240000
   }
   const out = {
     engine: "tavily", input, model, status: j.status || "unknown",
-    answer: j.answer || j.output || j.result || null,
+    answer: j.content || j.answer || j.output || j.result || null,
     sources: (j.sources || j.results || []).slice(0, 20),
     elapsedMs: Date.now() - t0, cached: false,
   };
@@ -247,13 +256,13 @@ export async function tavilyResearch(input, { model = "auto", timeoutMs = 240000
   return out;
 }
 
-export async function exaAgent(query, { effort = "auto", maxCostDollars = 1, timeoutMs = 300000 } = {}) {
+export async function exaAgent(query, { effort = "auto", timeoutMs = 300000 } = {}) {
   if (!EXA_KEY()) throw new Error("EXA_API_KEY missing");
   const key = "a:" + JSON.stringify([query, effort]);
   const hit = cacheGet(key);
   if (hit) return { ...hit.value, cached: true, cacheAgeMs: Date.now() - hit.at };
 
-  const created = await jpost("https://api.exa.ai/agent/runs", { query, effort, budget: { maxCostDollars } }, exaHeaders(), 60000, "exa.agent");
+  const created = await jpost("https://api.exa.ai/agent/runs", { query, effort }, exaHeaders(), 60000, "exa.agent");
   const t0 = Date.now();
   let j = created;
   while (j.status && j.status !== "completed" && j.status !== "failed") {
