@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import {
   canonical, hostOf, rrf, authorityOf, paidOrder, detectQueryType,
-  abortedError, throwIfAborted, envStatus, loadEnvFile, search, fetchText,
+  abortedError, throwIfAborted, envStatus, loadEnvFile, search, fetchText, isJunkText, quotesFrom, decodeEntities,
 } from "../lib.mjs";
 
 let pass = 0;
@@ -68,6 +68,25 @@ function offline() {
   assert.ok(Array.isArray(s.missing));
   assert.ok(!("EXA_API_KEY_value" in s), "envStatus 不回密钥值");
   ok("envStatus 不泄漏密钥");
+
+  assert.equal(isJunkText("Just a moment... Enable JavaScript and cookies to continue"), true);
+  assert.equal(isJunkText("short"), true);
+  assert.equal(isJunkText("lorem ipsum dolor sit amet ".repeat(40)), false);
+  ok("isJunkText 认出反爬占位页");
+
+  const doc = "Skip to content Navigation Menu Sign in Pricing. "
+    + "MQTT retained message stores the last value published to a topic, and the broker resends it on subscribe. "
+    + "Cookie policy applies to all users of this site. "
+    + "Retained messages have no recorded age in MQTT 3.1.1, so a subscriber cannot tell how stale the value is.";
+  const qs = quotesFrom(doc, ["mqtt", "retained", "age"], 3);
+  orThrow(qs.length >= 1, "quotesFrom 没挑出引句");
+  orThrow(qs.every((s) => !/skip to content|navigation menu|cookie policy/i.test(s)), "引句里混进导航垃圾: " + qs.join(" | "));
+  orThrow(/retained/i.test(qs[0]), "最优引句没命中术语: " + qs[0]);
+  ok("quotesFrom 剔导航垃圾、按术语打分");
+
+  assert.equal(decodeEntities("a&#xff0c;b &amp; c&nbsp;d &#39;e&#39; &lt;t&gt;"), "a，b & c d 'e' <t>");
+  assert.equal(decodeEntities("&#99999999;x"), "x");
+  ok("decodeEntities 还原中文标点、丢弃越界码点");
 }
 
 // ── 联网：类型路由、正文增强、去重、取消 ────────────────────────────────────
@@ -99,6 +118,8 @@ async function live() {
     const enriched = out.results.filter((r) => typeof r.content === "string" && r.content.length > 0).length;
     console.log(`  ${q} → ${out.results.length} 条, type=${out.type}, recency=${out.recency}, enrich=${out.enriched}, 带正文 ${enriched} 条, ${out.elapsedMs}ms`);
     if (out.enriched) orThrow(enriched > 0, q + " enrich=on 但没抓到正文");
+    for (const r of out.results) orThrow(!r.content || !isJunkText(r.content), q + " 正文是占位页: " + r.url);
+    orThrow(enriched <= 3, q + " 正文预算超出 enrichTop: " + enriched);
     ok("类型 " + type);
   }
 

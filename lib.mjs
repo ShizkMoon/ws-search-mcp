@@ -118,6 +118,8 @@ import { join as pathJoin } from "node:path";
 import { homedir } from "node:os";
 
 const CACHE_TTL = Number(process.env.WS_CACHE_TTL_MS || 300000);
+// 缓存条目的语义版本：结果结构或排序规则变了就改这里，旧条目自动失效，不用手动清盘。
+const CACHE_SCHEMA = "v2";
 const CACHE_MAX = Number(process.env.WS_CACHE_MAX || 500);
 const DISK_ON = process.env.WS_CACHE_DISK !== "0";
 const DISK_DIR = process.env.WS_CACHE_DIR || pathJoin(homedir(), ".dsh", "cache");
@@ -297,6 +299,13 @@ export function rrf(lists, k = 60) {
   return [...map.values()].sort((a, b) => b.score - a.score).map((x) => ({ ...x, providers: [...x.providers] }));
 }
 
+/** 反爬占位页 / 空壳页：当正文用会误导判断，一律算抓取失败。 */
+export function isJunkText(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (t.length < 200) return true;
+  return /(enable javascript and cookies|just a moment\.\.\.|access denied|are you a robot|captcha|cf-error-details|checking your browser|请稍候|需要验证|安全验证)/i.test(t.slice(0, 800));
+}
+
 function diversify(list, n, maxPerDomain) {
   const counts = new Map();
   const picked = [];
@@ -332,7 +341,7 @@ export async function search(query, o = {}) {
   const providers = o.providers || [...paidOrder(query), "searxng"];
   const opts = { ...recencyOpts(recency), signal: o.signal };
 
-  const cacheKey = "s:" + JSON.stringify([queries, n, paid, providers, recency, maxPerDomain, enrich]);
+  const cacheKey = CACHE_SCHEMA + ":s:" + JSON.stringify([queries, n, paid, providers, recency, maxPerDomain, enrich, enrichTop]);
   const hit = cacheGet(cacheKey);
   if (hit) return { ...hit.value, elapsedMs: 0, cached: true, cacheAgeMs: Date.now() - hit.at, originalElapsedMs: hit.value.elapsedMs };
 
@@ -381,11 +390,14 @@ export async function search(query, o = {}) {
     snippet: (r.snippet || "").slice(0, i < 5 ? snippetHead : snippetRest),
   }));
 
-  // 正文增强：给前几条附真实正文，便于判断是否值得深入（本机抓取、免费、有缓存）
-  if (enrich && merged.length) {
-    await Promise.all(merged.slice(0, enrichTop).map(async (r) => {
+  // 正文增强：给靠前的几条附真实正文（本机抓取、免费、有缓存）。
+  // 多抓 enrichTop*2 条做替补：前几名常是反爬占位页，空壳不算正文，往后顺延。
+  if (enrich && merged.length && enrichTop > 0) {
+    const pool = merged.slice(0, Math.min(merged.length, enrichTop * 2));
+    await Promise.all(pool.map(async (r) => {
       try {
         const f = await fetchText(r.url, enrichChars, o.signal);
+        if (isJunkText(f.text)) { r.contentError = "blocked or empty page"; return; }
         r.contentChars = f.chars;
         r.content = f.text;
       } catch (e) {
@@ -393,6 +405,14 @@ export async function search(query, o = {}) {
         r.contentError = String((e && e.message) || e).slice(0, 80);
       }
     }));
+    // 正文预算只花在前 enrichTop 条成功的上，替补的只用来顶位。
+    let kept = 0;
+    for (const r of merged) {
+      if (!r.content) continue;
+      if (kept < enrichTop) { kept += 1; continue; }
+      delete r.content;
+      delete r.contentChars;
+    }
   }
   throwIfAborted(o.signal);
 
@@ -404,20 +424,37 @@ export async function search(query, o = {}) {
   return out;
 }
 
+/** HTML 实体还原：中文站点常把标点写成 &#xff0c;，不还原引句里全是乱码。 */
+export function decodeEntities(s) {
+  const codePoint = (n) => {
+    try { return Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ""; } catch { return ""; }
+  };
+  return String(s || "")
+    .replace(/&#x([0-9a-fA-F]{1,6});/g, (_, h) => codePoint(parseInt(h, 16)))
+    .replace(/&#(\d{1,8});/g, (_, d) => codePoint(parseInt(d, 10)))
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+}
+
 // ── 正文抽取 ────────────────────────────────────────────────────────────────
 export async function fetchText(url, max = 3000, signal) {
   throwIfAborted(signal);
-  const cacheKey = "f:" + url + ":" + max;
+  const cacheKey = CACHE_SCHEMA + ":f:" + url + ":" + max;
   const hit = cacheGet(cacheKey);
   if (hit) return { ...hit.value, elapsedMs: 0, cached: true, cacheAgeMs: Date.now() - hit.at };
 
   const r = await withTimeout(fetch(url, { headers: { "user-agent": UA }, signal }), 20000, "fetch");
-  const text = await r.text();
-  const clean = text.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "")
+  const raw = await r.text();
+  const text = decodeEntities(raw)
+    .replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   const out = {
-    url, status: r.status, title: (text.match(/<title[^>]*>([^<]*)</i) || [, ""])[1],
-    chars: clean.length, text: clean.slice(0, max), cached: false,
+    url, status: r.status, title: decodeEntities((raw.match(/<title[^>]*>([^<]*)</i) || [, ""])[1]),
+    chars: text.length, text: text.slice(0, max), cached: false,
   };
   cacheSet(cacheKey, out, 600000);
   return out;
@@ -581,16 +618,25 @@ function facetQueries(query, type) {
   return [`${query} explained internals`, `${query} alternatives comparison`];
 }
 
-/** 从正文里挑与术语相关的句子当引句。 */
-function quotesFrom(text, terms, max = 4) {
-  const sentences = text.split(/(?<=[。！？!?])\s*|(?<=\.)\s+/).map((s) => s.trim()).filter((s) => s.length >= 12);
+/** 导航条、cookie 横幅、页脚：抓正文时经常混进来，含这些词的句子没有信息量。 */
+const NAV_JUNK = /(skip to content|navigation menu|toggle navigation|sign in|sign up|pricing|contact us|privacy policy|terms of service|cookie|all rights reserved|newsletter|share this|related posts|首页|登录|注册|菜单|返回顶部)/i;
+
+/** 从正文里挑与术语相关的句子当引句：先剔导航垃圾，再按命中术语数 + 像不像正文打分。 */
+export function quotesFrom(text, terms, max = 4) {
+  const sentences = String(text || "").split(/(?<=[。！？!?])\s*|(?<=\.)\s+/).map((s) => s.trim());
   const scored = [];
   for (const s of sentences) {
+    if (s.length < 24 || s.length > 600) continue;
+    if (NAV_JUNK.test(s)) continue;
     const low = s.toLowerCase();
-    const hit = terms.reduce((n, t) => (low.includes(t.toLowerCase()) ? n + 1 : n), 0);
-    if (hit > 0) scored.push({ s, hit });
+    let hit = 0;
+    for (const t of terms) if (t && low.includes(t.toLowerCase())) hit += 1;
+    if (hit === 0) continue;
+    const prose = /[，,;；:：]/.test(s) ? 1 : 0;   // 有从句、像人写的句子
+    const digit = /\d/.test(s) ? 0.5 : 0;          // 定义/参数类句子常带数字
+    scored.push({ s, score: hit * 2 + prose + digit });
   }
-  scored.sort((a, b) => b.hit - a.hit);
+  scored.sort((a, b) => b.score - a.score);
   const seen = new Set();
   const out = [];
   for (const { s } of scored) {
@@ -654,7 +700,11 @@ export async function deepSearch(query, o = {}) {
     await Promise.all(pending.map(async (r) => {
       try {
         const f = await fetchText(r.url, fetchChars, signal);
-        fetched.set(canonical(r.url), { text: f.text || "", title: f.title, chars: f.chars, status: f.status });
+        if (isJunkText(f.text)) {
+          fetched.set(canonical(r.url), { text: "", title: f.title, chars: f.chars, status: f.status, error: "blocked or empty page" });
+        } else {
+          fetched.set(canonical(r.url), { text: f.text || "", title: f.title, chars: f.chars, status: f.status });
+        }
       } catch (e) {
         if (e && e.code === "cancelled") throw e;
         fetched.set(canonical(r.url), { text: "", error: String((e && e.message) || e).slice(0, 80) });

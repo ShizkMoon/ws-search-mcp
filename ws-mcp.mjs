@@ -1,12 +1,26 @@
 #!/usr/bin/env node
 // ws-mcp — 把 ws 检索网关暴露为 MCP server（stdio, JSON-RPC 2.0, 按行分隔）
 import { createInterface } from "node:readline";
-import { search, fetchText, tavilyExtract, tavilyCrawl, tavilyMap, tavilyResearch, exaAgent, cacheStats, deepSearch, loadEnvFile, envStatus, ENV_FILE } from "./lib.mjs";
+import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// lib.mjs 按 mtime 热加载：改完检索逻辑，下一次 tools/call 就生效，不用重启子进程
+// （DSH 的 profile provider 用同一套做法，两边共用同一份 lib.mjs）。
+const LIB_PATH = join(dirname(fileURLToPath(import.meta.url)), "lib.mjs");
+let libCache = { v: null, mod: null };
+async function getLib() {
+  let v = "0";
+  try { v = String(Math.trunc(statSync(LIB_PATH).mtimeMs)); } catch {}
+  if (libCache.v !== v) libCache = { v, mod: await import(`${pathToFileURL(LIB_PATH).href}?v=${v}`) };
+  return libCache.mod;
+}
 
 // 密钥来源：模块同目录的 .env（或 WS_ENV_FILE 指定的路径）。启动读一次，
 // 之后每次调用再读一次（override），这样换钥匙不必重启 MCP 子进程。
-const envBoot = loadEnvFile(undefined, { override: true });
-if (!envBoot.found) process.stderr.write(`ws-mcp: ${ENV_FILE} not found; relying on inherited environment\n`);
+const boot = await getLib();
+const envBoot = boot.loadEnvFile(undefined, { override: true });
+if (!envBoot.found) process.stderr.write(`ws-mcp: ${boot.ENV_FILE} not found; relying on inherited environment\n`);
 
 const TOOLS = [
   {
@@ -116,22 +130,34 @@ const TOOLS = [
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 const HANDLERS = {
-  ws_search: (a) => search(a.query, { n: a.n ?? 25, paid: a.paid, recency: a.recency, maxPerDomain: a.max_per_domain ?? 3, queries: a.queries, enrich: a.enrich }),
-  ws_fetch: (a) => (Array.isArray(a.urls) && a.urls.length
-    ? tavilyExtract(a.urls, { depth: a.depth ?? "basic" })
-    : fetchText(a.url, a.max ?? 3000)),
-  ws_map: (a) => tavilyMap(a.url, { limit: a.limit ?? 50, maxDepth: a.max_depth ?? 2 }),
-  ws_crawl: (a) => tavilyCrawl(a.url, { limit: a.limit ?? 20, maxDepth: a.max_depth ?? 1, instructions: a.instructions }),
-  ws_research: (a) => tavilyResearch(a.input, { model: a.model ?? "auto" }),
-  ws_agent: (a) => exaAgent(a.query, { effort: a.effort ?? "auto" }),
-    ws_deep: (a) => deepSearch(a.query, {
+  ws_search: async (a) => {
+    const L = await getLib();
+    return L.search(a.query, { n: a.n ?? 25, paid: a.paid, recency: a.recency, maxPerDomain: a.max_per_domain ?? 3, queries: a.queries, enrich: a.enrich });
+  },
+  ws_fetch: async (a) => {
+    const L = await getLib();
+    return Array.isArray(a.urls) && a.urls.length
+      ? L.tavilyExtract(a.urls, { depth: a.depth ?? "basic" })
+      : L.fetchText(a.url, a.max ?? 3000);
+  },
+  ws_map: async (a) => (await getLib()).tavilyMap(a.url, { limit: a.limit ?? 50, maxDepth: a.max_depth ?? 2 }),
+  ws_crawl: async (a) => (await getLib()).tavilyCrawl(a.url, { limit: a.limit ?? 20, maxDepth: a.max_depth ?? 1, instructions: a.instructions }),
+  ws_research: async (a) => (await getLib()).tavilyResearch(a.input, { model: a.model ?? "auto" }),
+  ws_agent: async (a) => (await getLib()).exaAgent(a.query, { effort: a.effort ?? "auto" }),
+  ws_deep: async (a) => {
+    const L = await getLib();
+    return L.deepSearch(a.query, {
       rounds: Math.min(4, Math.max(1, a.rounds ?? 2)),
       pages: a.pages ?? 6,
       minCoverage: a.min_coverage ?? 0.6,
       recency: a.recency,
       paid: a.paid,
-    }),
-  ws_env: () => ({ ...envStatus(), cache: cacheStats() }),
+    });
+  },
+  ws_env: async () => {
+    const L = await getLib();
+    return { ...L.envStatus(), cache: L.cacheStats(), libVersion: libCache.v };
+  },
 };
 
 async function handle(msg) {
@@ -140,7 +166,7 @@ async function handle(msg) {
     return send({ jsonrpc: "2.0", id, result: {
       protocolVersion: params?.protocolVersion || "2025-06-18",
       capabilities: { tools: {} },
-      serverInfo: { name: "ws", version: "0.2.0" },
+      serverInfo: { name: "ws", version: "0.3.0" },
     } });
   }
   if (method === "notifications/initialized") return;
@@ -151,7 +177,7 @@ async function handle(msg) {
     try {
       const fn = HANDLERS[name];
       if (!fn) throw new Error("unknown tool: " + name);
-      loadEnvFile(undefined, { override: true });
+      (await getLib()).loadEnvFile(undefined, { override: true });
       const out = await fn(a);
       return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } });
     } catch (e) {

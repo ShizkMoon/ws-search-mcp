@@ -14,7 +14,8 @@ tests/smoke.mjs  自检：离线断言 + `--live` 联网回归
 
 - **候选池**：DSH 侧先取 `maxResults × poolFactor`（默认 3，夹在 12–50）条做 RRF 融合，再截到 `maxResults`。付费源按请求计费，扩大池子不多花钱。
 - **查询类型自动路由**（`detectQueryType`）：navigational / news(recency=week) / comparative(paid=2, enrich) / howto(enrich) / factual(兜底, enrich)。`n` 恒为 25，只有时效、付费档和正文增强随类型变。
-- **正文增强**：`enrich` 给前 `enrichTop` 条抓真实正文（本机抓取、免费、有缓存），放进 `content`，DSH 侧映射成 `WebSearchSource.summary`。
+- **正文增强**：`enrich` 给前 `enrichTop` 条抓真实正文（本机抓取、免费、有缓存），放进 `content`，DSH 侧映射成 `WebSearchSource.summary`。抓回的是反爬占位页（Cloudflare "Just a moment"）或空壳页时当失败处理，往后顺延替补，正文预算只花在真内容上。
+- **深检引句**：`ws_deep` 的 `quotes` 先剔导航条 / cookie 横幅 / 页脚（`NAV_JUNK`），再按命中术语数 + 是否像正文（有从句、带数字）打分，避免把 "Skip to content" 当证据。
 - **排序**：RRF 分数 × 权威度权重（wikipedia/arxiv/.edu/.gov ×1.25，docs./github ×1.2，内容农场 ×0.75，quora/reddit ×0.9）；同域默认最多 3 条。
 - **缓存**：进程内 LRU + 落盘共享 `~/.dsh/cache/ws-cache.json`（search 5 分钟、fetch 10 分钟、crawl/map 10 分钟）。命中时 `cached: true`、`elapsedMs: 0`。
 - **降级**：任一源失败只是把错误记进 `providers[].error`，整体不报错；四源全失败且 0 结果时才抛错，消息里带 `.env` 路径。
@@ -54,6 +55,7 @@ SEARXNG_URL=http://host:8888
 ## 自检
 
 ```bash
-node tests/smoke.mjs          # 离线：canonical / rrf / 类型路由 / 取消 / envStatus
+node tests/smoke.mjs          # 离线：canonical / rrf / 类型路由 / 取消 / 占位页与引句判定
 node tests/smoke.mjs --live   # 联网：五种类型真打，校验去重、同域上限、正文增强、取消
+node tests/mcp-selftest.mjs   # 起真的 stdio 子进程：握手 + tools/list + ws_env，不联网
 ```
