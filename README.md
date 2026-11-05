@@ -14,7 +14,7 @@ tests/smoke.mjs  自检：离线断言 + `--live` 联网回归
 
 - **候选池**：DSH 侧先取 `maxResults × poolFactor`（默认 3，夹在 12–50）条做 RRF 融合，再截到 `maxResults`。付费源按请求计费，扩大池子不多花钱。
 - **查询类型自动路由**（`detectQueryType`）：navigational / news(recency=week) / comparative(paid=2, enrich) / howto(enrich) / factual(兜底, enrich)。`n` 恒为 25，只有时效、付费档和正文增强随类型变。
-- **正文增强**：`enrich` 给前 `enrichTop` 条抓真实正文（本机抓取、免费、有缓存），放进 `content`，DSH 侧映射成 `WebSearchSource.summary`。抓回的是反爬占位页（Cloudflare "Just a moment"）或空壳页时当失败处理，往后顺延替补，正文预算只花在真内容上。
+- **正文增强**：`enrich` 给前 `enrichTop` 条抓真实正文（本机抓取、免费、有缓存），放进 `content`，DSH 侧映射成 `WebSearchSource.summary`。抓回的是反爬占位页（Cloudflare "Just a moment"）、只剩导航的外壳页或空壳页时当失败处理，往后顺延替补；正文开头的站点导航也会被掐掉，正文预算只花在真内容上。
 - **深检引句**：`ws_deep` 的 `quotes` 先剔导航条 / cookie 横幅 / 页脚（`NAV_JUNK`），再按命中术语数 + 是否像正文（有从句、带数字）打分，避免把 "Skip to content" 当证据。
 - **排序**：RRF 分数 × 权威度权重（wikipedia/arxiv/.edu/.gov ×1.25，docs./github ×1.2，内容农场 ×0.75，quora/reddit ×0.9）；同域默认最多 3 条。
 - **缓存**：进程内 LRU + 落盘共享 `~/.dsh/cache/ws-cache.json`（search 5 分钟、fetch 10 分钟、crawl/map 10 分钟）。命中时 `cached: true`、`elapsedMs: 0`。

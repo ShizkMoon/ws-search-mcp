@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import {
   canonical, hostOf, rrf, authorityOf, paidOrder, detectQueryType,
-  abortedError, throwIfAborted, envStatus, loadEnvFile, search, fetchText, isJunkText, quotesFrom, decodeEntities,
+  abortedError, throwIfAborted, envStatus, loadEnvFile, search, fetchText, isJunkText, trimChrome, quotesFrom, decodeEntities,
 } from "../lib.mjs";
 
 let pass = 0;
@@ -73,6 +73,22 @@ function offline() {
   assert.equal(isJunkText("short"), true);
   assert.equal(isJunkText("lorem ipsum dolor sit amet ".repeat(40)), false);
   ok("isJunkText 认出反爬占位页");
+
+  const shell = "立即填寫 登入 / 註冊 我的課程 個人檔案 我的訂單 我的優惠券 訂閱通知 熱門搜尋 合作專區 課程管理 "
+    + "這是一段被截斷的內容 ".repeat(20);
+  assert.equal(isJunkText(shell), true, "只剩站点导航的页面没被认出");
+  const realDoc = "Streams carry data from a producer to a consumer, and backpressure keeps memory bounded. ".repeat(20)
+    + " You can sign in to comment on this article.";
+  assert.equal(isJunkText(realDoc), false, "正常长文被误判成垃圾");
+  ok("isJunkText 认出站点外壳页、不误杀长文");
+
+  const body = "這是正文第一段，講的是 stream 的背壓與緩衝區水位，內容足夠長，可以當作正文起點使用，所以多寫幾個字確認不會被誤刪。";
+  const blob = "登入 / 註冊 首頁 菜單 購物車 優惠券 訂閱通知 關於我們 合作專區 " + (body + " ").repeat(3);
+  const trimmed = trimChrome(blob);
+  assert.ok(!/登入|購物車/.test(trimmed.slice(0, 40)), "trimChrome 没掐掉开头导航: " + trimmed.slice(0, 40));
+  assert.ok(/背壓/.test(trimmed), "trimChrome 把正文掐没了");
+  assert.equal(trimChrome("短文本"), "短文本");
+  ok("trimChrome 掐掉开头导航、短文本原样返回");
 
   const doc = "Skip to content Navigation Menu Sign in Pricing. "
     + "MQTT retained message stores the last value published to a topic, and the broker resends it on subscribe. "

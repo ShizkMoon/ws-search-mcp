@@ -119,7 +119,7 @@ import { homedir } from "node:os";
 
 const CACHE_TTL = Number(process.env.WS_CACHE_TTL_MS || 300000);
 // 缓存条目的语义版本：结果结构或排序规则变了就改这里，旧条目自动失效，不用手动清盘。
-const CACHE_SCHEMA = "v2";
+const CACHE_SCHEMA = "v3";
 const CACHE_MAX = Number(process.env.WS_CACHE_MAX || 500);
 const DISK_ON = process.env.WS_CACHE_DISK !== "0";
 const DISK_DIR = process.env.WS_CACHE_DIR || pathJoin(homedir(), ".dsh", "cache");
@@ -299,11 +299,56 @@ export function rrf(lists, k = 60) {
   return [...map.values()].sort((a, b) => b.score - a.score).map((x) => ({ ...x, providers: [...x.providers] }));
 }
 
-/** 反爬占位页 / 空壳页：当正文用会误导判断，一律算抓取失败。 */
+/** 反爬占位页 / 空壳页 / 只剩站点导航的页面：当正文用会误导判断，一律算抓取失败。 */
+const CHROME_TOKENS = /(登入|登出|註冊|注册|登录|首页|首頁|菜单|選單|我的订单|我的訂單|个人中心|個人檔案|购物车|購物車|优惠券|優惠券|订阅通知|訂閱通知|未读訊息|未讀訊息|立即填寫|立即认证|热门搜寻|熱門搜尋|合作專區|在线课程|線上課程|课程管理|課程管理|sign in|log in|sign up|my account|shopping cart|add to cart|newsletter|cookie policy|privacy policy|terms of service|all rights reserved|skip to content|docs\.rs crate page|crates\.io|permalink)/gi;
+
 export function isJunkText(text) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (t.length < 200) return true;
-  return /(enable javascript and cookies|just a moment\.\.\.|access denied|are you a robot|captcha|cf-error-details|checking your browser|请稍候|需要验证|安全验证)/i.test(t.slice(0, 800));
+  if (/(enable javascript and cookies|just a moment\.\.\.|access denied|are you a robot|captcha|cf-error-details|checking your browser|请稍候|需要验证|安全验证)/i.test(t.slice(0, 800))) return true;
+  // 长文里偶尔出现 "sign in" 是正常的；命中 6 种以上不同导航词，说明抓到的是站点外壳而不是正文。
+  const hits = new Set((t.match(CHROME_TOKENS) || []).map((s) => s.toLowerCase()));
+  return hits.size >= 6;
+}
+
+/**
+ * 掐掉正文开头的站点外壳：段落级扫描，遇到导航词就跳过，遇到第一段真内容就停。
+ * 只处理开头 40 段，避免把正文中提到 "sign in" 的段落也删掉。
+ */
+export function trimChrome(text) {
+  const t = String(text || "");
+  const segs = t.split(/(?<=[。！？!?])\s+|(?<=\.)\s+/);
+  let i = 0;
+  let skipped = 0;
+  while (i < segs.length && i < 40 && skipped < 2000) {
+    const seg = segs[i];
+    const isChrome = CHROME_TOKENS.test(seg);
+    CHROME_TOKENS.lastIndex = 0;
+    const isStub = seg.trim().length < 60;
+    if (!isChrome && !isStub) break;
+    skipped += seg.length + 1;
+    i++;
+  }
+  let out = segs.slice(i).join(" ").trim();
+  // 段落切分解决不了"整块导航无句末标点"的页面（典型：站点把顶栏压成一坨文本），
+  // 退一步：找到前 3000 字里最后一个导航词，从它后面第一个句末标点起算正文。
+  if (out.length < 120 || CHROME_TOKENS.test(out.slice(0, 300))) {
+    CHROME_TOKENS.lastIndex = 0;
+    const head = t.slice(0, 3000);
+    const re = new RegExp(CHROME_TOKENS.source, "gi");
+    let last = -1;
+    let m;
+    while ((m = re.exec(head))) last = m.index + m[0].length;
+    if (last >= 0) {
+      const tail = t.slice(last);
+      const cut = tail.search(/[。！？!?]|\.\s/);
+      const start = cut >= 0 ? last + cut + 1 : last;
+      const trimmed = t.slice(start).trim();
+      if (trimmed.length > 120) out = trimmed;
+    }
+  }
+  CHROME_TOKENS.lastIndex = 0;
+  return out.length >= 120 ? out : t.trim();
 }
 
 function diversify(list, n, maxPerDomain) {
@@ -449,9 +494,12 @@ export async function fetchText(url, max = 3000, signal) {
 
   const r = await withTimeout(fetch(url, { headers: { "user-agent": UA }, signal }), 20000, "fetch");
   const raw = await r.text();
-  const text = decodeEntities(raw)
-    .replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  // 先剥标签再还原实体：反过来的话正文里的 &lt;Buffer ...&gt; 会被当成标签吃掉。
+  const text = trimChrome(decodeEntities(
+    raw.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+  ));
   const out = {
     url, status: r.status, title: decodeEntities((raw.match(/<title[^>]*>([^<]*)</i) || [, ""])[1]),
     chars: text.length, text: text.slice(0, max), cached: false,
