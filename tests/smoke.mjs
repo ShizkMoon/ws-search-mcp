@@ -88,7 +88,9 @@ function offline() {
   assert.ok(!/登入|購物車/.test(trimmed.slice(0, 40)), "trimChrome 没掐掉开头导航: " + trimmed.slice(0, 40));
   assert.ok(/背壓/.test(trimmed), "trimChrome 把正文掐没了");
   assert.equal(trimChrome("短文本"), "短文本");
-  ok("trimChrome 掐掉开头导航、短文本原样返回");
+  const withFooter = (body + " ").repeat(4) + " 隱私政策 使用條款 PressPlay © 2016-2026 All Rights Reserved 瑞奧股份有限公司 統一編號： 54225569";
+  assert.ok(!/All Rights Reserved|統一編號/.test(trimChrome(withFooter)), "页脚没被切掉");
+  ok("trimChrome 掐掉开头导航与结尾页脚、短文本原样返回");
 
   const doc = "Skip to content Navigation Menu Sign in Pricing. "
     + "MQTT retained message stores the last value published to a topic, and the broker resends it on subscribe. "

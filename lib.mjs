@@ -348,6 +348,14 @@ export function trimChrome(text) {
     }
   }
   CHROME_TOKENS.lastIndex = 0;
+  // 尾巴同理：页脚、版权、分享条常常整段跟着抓进来，从最后一个页脚标记切掉。
+  const tailFrom = Math.max(0, out.length - 3000);
+  const tailMark = /(all rights reserved|©\s*\d{4}|隐私政策|隱私政策|使用条款|使用條款|返回顶部|返回最上方|回到顶部|subscribe to our newsletter)/i;
+  const tailHit = out.slice(tailFrom).search(tailMark);
+  if (tailHit >= 0) {
+    const cutAt = tailFrom + tailHit;
+    if (cutAt > out.length * 0.5) out = out.slice(0, cutAt).trim();
+  }
   return out.length >= 120 ? out : t.trim();
 }
 
